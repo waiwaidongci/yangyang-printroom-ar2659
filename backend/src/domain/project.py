@@ -3,22 +3,31 @@
 from collections import Counter
 from datetime import date
 
-from .evaluation import forecast_future, rolling_backtest
+from .checkpoint import CheckpointStore
+from .evaluation import forecast_future, resumable_rolling_backtest
 from .fixtures import demo_rows
 from .inputs import missing_ranges, normalize_rows, readings_by_day
 from .model import fit_difference_ar, minimum_pairs, training_pairs
-from .reporting import backtest_report, forecast_report, gaps_report, iso_day, model_report
+from .reporting import (
+    adjacent_wet_report,
+    backtest_report,
+    forecast_report,
+    gaps_report,
+    iso_day,
+    model_report,
+)
 from .spec import SPEC, normalize_settings
 
 
 __all__ = ["SPEC", "demo_rows", "normalize_rows", "analyze"]
 
 
-def analyze(rows: list[dict], settings: dict) -> dict:
+def analyze(rows: list[dict], settings: dict, store: CheckpointStore | None = None) -> dict:
     configuration = normalize_settings(settings)
     order = configuration["lag_order"]
     horizon = configuration["forecast_days"]
     lookback = configuration["backtest_days"]
+    threshold = configuration["wet_threshold"]
     readings = readings_by_day(normalize_rows(rows))
     first, last = min(readings), max(readings)
     if last + horizon > date.max.toordinal():
@@ -34,11 +43,13 @@ def analyze(rows: list[dict], settings: dict) -> dict:
 
     first_backtest = max(first, last - lookback + 1)
     gaps = missing_ranges(readings)
-    backtest = rolling_backtest(readings, pairs, order, first_backtest, last)
+    backtest, resume = resumable_rolling_backtest(
+        readings, pairs, order, first_backtest, last, store,
+    )
     model = fit_difference_ar(pairs, order)
     forecasts = forecast_future(readings, model, last, order, horizon)
     missing_days = sum(gap.days for gap in gaps)
-    metrics, backtest_table = backtest_report(backtest, missing_days)
+    metrics, backtest_table = backtest_report(backtest, missing_days, resume)
 
     scored = metrics["回测评分天数"]
     summary = (
@@ -57,11 +68,16 @@ def analyze(rows: list[dict], settings: dict) -> dict:
         warnings.append(f"回测跳过 {sum(skipped.values())} 天（{counts}），两种 MAE 均只使用已评分日期。")
     if not scored:
         warnings.append("当前窗口没有可比较的日期，请扩大回测窗口、降低阶数或补充可核实记录。")
+    if resume.restored_days:
+        warnings.append(
+            f"断点续跑：{resume.restored_days} 个回测日沿用已判定结果未重算，"
+            f"本次新判 {resume.computed_days} 天。"
+        )
     if forecasts[0].prediction is None:
         summary += f"末段缺少连续 {order + 1} 天实测，已列出待补测的未来晨检日期。"
         warnings.append(f"末次实测无法构造 {order} 阶连续差分，未来预报暂缺。")
     else:
-        summary += f"从末次实测递推 {horizon} 天，达到或超过 {configuration['wet_threshold']}%RH 的日期优先晨检。"
+        summary += f"从末次实测递推 {horizon} 天，达到或超过 {threshold}%RH 的日期优先晨检。"
     bounded_backtest = sum(
         result.prediction is not None and result.prediction.boundary != "未触发"
         for result in backtest
@@ -77,7 +93,8 @@ def analyze(rows: list[dict], settings: dict) -> dict:
         "summary": summary,
         "metrics": metrics,
         "tables": [
-            forecast_report(forecasts, configuration["wet_threshold"]),
+            forecast_report(forecasts, threshold),
+            adjacent_wet_report(forecasts, threshold, last),
             backtest_table,
             gaps_report(gaps, last, order, first_backtest),
             model_report(model, last, len(pairs)),

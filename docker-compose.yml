@@ -9,6 +9,7 @@ services:
       DATABASE_URL: sqlite:////data/workbench.db
       JWT_SECRET: "${JWT_SECRET:-demo-signing-key-local-only-setup}"
       SEED_DEMO: "${SEED_DEMO:-true}"
+      CHECKPOINT_DIR: "/data/checkpoints"
     volumes:
       - database:/data
     healthcheck:

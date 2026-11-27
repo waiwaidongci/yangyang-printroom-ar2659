@@ -18,3 +18,4 @@ class RunInfo(BaseModel):
     status: RunStatus
     settings: dict
     decision: str | None
+    adjacent_wet_pair_count: int | None = None

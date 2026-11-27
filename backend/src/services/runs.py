@@ -1,6 +1,5 @@
 import math
 
-from fastapi import HTTPException
 from sqlalchemy import select
 
 from src.constants.workflow import Decision, Role, RunStatus
@@ -14,7 +13,15 @@ from src.utils.time import utc_stamp
 
 def run_info(run, review):
     fields = ('id', 'label', 'dataset_id', 'created_at', 'status', 'settings')
-    return {**{key: getattr(run, key) for key in fields}, 'decision': review.decision if review else None}
+    info = {**{key: getattr(run, key) for key in fields}, 'decision': review.decision if review else None}
+    if run.result is not None:
+        wet_pairs_table = next(
+            (table for table in run.result['tables'] if table['key'] == 'adjacent_wet_pairs'), None,
+        )
+        info['adjacent_wet_pair_count'] = 0 if wet_pairs_table is None else len(wet_pairs_table['rows'])
+    else:
+        info['adjacent_wet_pair_count'] = None
+    return info
 
 
 def list_runs(session, actor):
@@ -64,8 +71,6 @@ def create_run(session, payload, actor):
 
 def export_table(session, run_id, key, actor):
     run, review = get_run(session, run_id, actor)
-    if review is None or review.decision != Decision.APPROVED:
-        raise HTTPException(409, '复核通过后可下载正式 CSV')
     for table in run.result['tables']:
         if table['key'] == key:
             return table

@@ -3,7 +3,7 @@
 from datetime import date
 from statistics import mean
 
-from .evaluation import BacktestDay, ForecastDay
+from .evaluation import BacktestDay, ForecastDay, ResumeStats
 from .inputs import MissingRange
 from .model import DifferenceAR, Prediction
 
@@ -30,7 +30,9 @@ def prediction_cells(prediction: Prediction | None) -> dict:
     }
 
 
-def backtest_report(backtest: list[BacktestDay], missing_days: int) -> tuple[dict, dict]:
+def backtest_report(
+    backtest: list[BacktestDay], missing_days: int, resume: ResumeStats | None = None,
+) -> tuple[dict, dict]:
     model_errors = []
     baseline_errors = []
     rows = []
@@ -62,6 +64,8 @@ def backtest_report(backtest: list[BacktestDay], missing_days: int) -> tuple[dic
         "沿用昨日 MAE（百分点）": measurement(baseline_mae),
         "MAE 改善（百分点）": measurement(improvement),
         "台账缺测天数": missing_days,
+        "断点续跑恢复天数": 0 if resume is None else resume.restored_days,
+        "本次新判天数": len(backtest) if resume is None else resume.computed_days,
     }
     table = report_table("rolling_backtest", "逐日一步回测", {
         "date": "目标日",
@@ -79,7 +83,30 @@ def backtest_report(backtest: list[BacktestDay], missing_days: int) -> tuple[dic
     return metrics, table
 
 
+def wet_pairs(forecasts: list[ForecastDay], threshold: int) -> list[tuple[ForecastDay, ForecastDay]]:
+    """预报期内相邻两个自然日都达到晨检阈值的连湿对。
+
+    两天都由末次实测的同一组起算读数、同一次递推链推出；
+    尾段缺测导致未生成预测的日期不参与连湿判定。
+    """
+    pairs = []
+    for earlier, later in zip(forecasts, forecasts[1:]):
+        if (
+            earlier.prediction is not None
+            and later.prediction is not None
+            and earlier.prediction.humidity >= threshold
+            and later.prediction.humidity >= threshold
+        ):
+            pairs.append((earlier, later))
+    return pairs
+
+
 def forecast_report(forecasts: list[ForecastDay], threshold: int) -> dict:
+    wet_pair_days = set()
+    for earlier, later in wet_pairs(forecasts, threshold):
+        wet_pair_days.add(earlier.day)
+        wet_pair_days.add(later.day)
+
     rows = []
     for horizon, result in enumerate(forecasts, start=1):
         prediction = result.prediction
@@ -98,6 +125,7 @@ def forecast_report(forecasts: list[ForecastDay], threshold: int) -> dict:
             "anchor_humidity": measurement(result.anchor),
             **prediction_cells(prediction),
             "applied_change": measurement(prediction.applied_change) if prediction is not None else None,
+            "in_wet_pair": "是" if result.day in wet_pair_days else "否",
             "action": action,
         })
     return report_table("future_checks", "未来晨检清单", {
@@ -109,6 +137,34 @@ def forecast_report(forecasts: list[ForecastDay], threshold: int) -> dict:
         "predicted_humidity": "限幅预报（%RH）",
         "boundary": "物理边界",
         "applied_change": "向后递推的差分（百分点）",
+        "in_wet_pair": "是否列入相邻连湿",
+        "action": "交班安排",
+    }, rows)
+
+
+def adjacent_wet_report(
+    forecasts: list[ForecastDay], threshold: int, last_measured_day: int,
+) -> dict:
+    """晨报清单：列全预报期内可能连续两天高湿、需要搬版的相邻日期。"""
+    anchor_origin = iso_day(last_measured_day)
+    rows = []
+    for earlier, later in wet_pairs(forecasts, threshold):
+        rows.append({
+            "first_date": iso_day(earlier.day),
+            "second_date": iso_day(later.day),
+            "first_humidity": measurement(earlier.prediction.humidity),
+            "second_humidity": measurement(later.prediction.humidity),
+            "threshold": threshold,
+            "anchor_origin": anchor_origin,
+            "action": "连续两天达到晨检阈值，安排搬版并优先晨检。",
+        })
+    return report_table("adjacent_wet_pairs", "相邻连湿搬版清单", {
+        "first_date": "连湿起日",
+        "second_date": "连湿止日",
+        "first_humidity": "起日限幅预报（%RH）",
+        "second_humidity": "止日限幅预报（%RH）",
+        "threshold": "晨检阈值（%RH）",
+        "anchor_origin": "共同起算实测日",
         "action": "交班安排",
     }, rows)
 
